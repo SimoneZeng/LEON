@@ -1959,29 +1959,44 @@ class DynamicProgramming(object):
                                      model, timeout, dropbuffer, nodeFeaturizer, greedy, subplans_fin, finsql,
                                      costCache,
                                      dpsign, levelList):
-        num_rels = len(query_leaves)
+        """
+        - 遍历 levels, 对于每一个 level
+            - 遍历左右所有元组
+                1. 合并左右两边的关系ID 获得 【join_ids】
+                2. 【遍历所有 join 连接】，将(dp cost,join, join_ids)  加入 bayes_tep
+                3. 对于 level > num_rels - 4, 获得 query_feats, trees, indexes; 非中间 level 的 costlist = dp_costs
+                    a) 重复计算 cost, 【计算UCB上置信界来估计不确定性】, 并放入 bayes_list
+                    b) 如果没有使用 dp, 遍历部分按UCB排序后的 plans, 获得一个 bayes_plan的 【latency】, 并加入该 level 的 trainBuffer 和 exp
+                4. 遍历 costlist 中的所有代价估计, 如果 join_ids 不在 dp_table 中或者原来存的 cost 更大, 更新 dp_table 
+            - 对于 中间层, 按 dp_table 中的 items 按 cost 排序, 进行【剪枝】
+        - 获得 【bestplanhint】, 使用 PG 计算其 latency
+
+        return
+        trainBuffer, bestplanhint, num, timeout
+        """
+        num_rels = len(query_leaves) # 指 查询涉及的关系数 即表的数量
         num = 0
         latency = 0
-        for i in range(0, num_rels + 1):
+        for i in range(0, num_rels + 1): # 创建 空的 trainBuffer
             trainBuffer.append([])
-        for level in range(2, num_rels + 1):
-            dp_table = dp_tables[level]
+        for level in range(2, num_rels + 1): # 遍历 不同 level，从两个关系的连接开始
+            dp_table = dp_tables[level] # 获取 当前 level 的 dp table， 并打乱 level-1 和 1 中的 key 顺序
             dp_table_i = random_dic(dp_tables[level - 1])
             dp_table_j = random_dic(dp_tables[1])
-            for l_ids, l_tup in dp_table_i.items():
+            for l_ids, l_tup in dp_table_i.items(): # 遍历 左表和右表中的所有元组
                 for r_ids, r_tup in dp_table_j.items():
-                    l = l_tup[1]
+                    l = l_tup[1] # 获取 表
                     r = r_tup[1]
-                    if not plans_lib.ExistsJoinEdgeInGraph(
+                    if not plans_lib.ExistsJoinEdgeInGraph( # 检查 两个关系是否有可用的连接关系，没有就跳过
                             l, r, join_graph):
                         # No join clause linking two sides.  Skip.
                         continue
                     l_ids_splits = l_ids.split(',')
                     r_ids_splits = r_ids.split(',')
-                    if len(np.intersect1d(l_ids_splits, r_ids_splits)) > 0:
+                    if len(np.intersect1d(l_ids_splits, r_ids_splits)) > 0: # 检查 某个关系是否在两边都存在
                         # A relation exists in both sides.  Skip.
                         continue
-                    join_ids = ','.join(sorted(l_ids_splits + r_ids_splits))
+                    join_ids = ','.join(sorted(l_ids_splits + r_ids_splits)) # 合并 左右两边的关系ID
                     # Otherwise, form a new join.
                     dp_costs = []
                     dp_query_encodings = []
@@ -1990,7 +2005,7 @@ class DynamicProgramming(object):
                     dp_join = []
                     bayes_tep = []
                     bayes_list = []
-                    for join in EnumerateJoinWithOps(
+                    for join in EnumerateJoinWithOps( # 遍历 所有有效的 join 操作
                             l,
                             r,
                             self.join_ops,
@@ -1999,12 +2014,12 @@ class DynamicProgramming(object):
                     ):
                         join.info["currentLevel"] = level
 
-                        join_conds = join.KeepRelevantJoins(all_join_conds)
+                        join_conds = join.KeepRelevantJoins(all_join_conds) # 获取 与当前 node 相关的连接条件
                         join.info["join_conds"] = join_conds
                         cost, sql, hint = self.cost_model.getCost_cache(join, join_conds, costCache)
                         join.info["cost"] = cost
                         logcost = math.log(cost)
-                        data = encoding.getencoding_Balsa(sql, hint, workload)
+                        data = encoding.getencoding_Balsa(sql, hint, workload) # 获得 encoding后的query_vecs 和 node
                         join.info["encoding"] = data[0]
                         join.info["node"] = data[1]
                         dp_join.append(join)
@@ -2012,7 +2027,7 @@ class DynamicProgramming(object):
                         dp_query_encodings.append(data[0])
                         dp_nodes.append(data[1])
                         dp_hints_sqls.append([hint, sql])
-                        tem = []
+                        tem = [] # 创建 包含cost, sql, hint, encoding 的临时列表
                         tem.append(logcost)
                         tem.append(sql)
                         tem.append(hint)
@@ -2022,7 +2037,7 @@ class DynamicProgramming(object):
                         bayes_tep.append(btem)
                     #                    if level > num_rels - 5:
                     #                        levelList[level][join_ids] = [dp_costs, dp_query_encodings, dp_nodes]
-                    if not FirstTrain and level > num_rels - 4:
+                    if not FirstTrain and level > num_rels - 4: # 判断 是否 level 是中间位置 底层几个 level 不使用 ML 的方法
                         query_feats = (torch.cat(dp_query_encodings, dim=0)).to(DEVICE)
                         trees, indexes = TreeConvFeaturize(nodeFeaturizer, dp_nodes)
                         if torch.cuda.is_available():
@@ -2031,37 +2046,37 @@ class DynamicProgramming(object):
                             torch_dpcosts = (torch.tensor(dp_costs)).to(DEVICE)
                         model[level].train()
                         costbais = []
-                        for i in range(10):
+                        for i in range(10): # 循环 10次
                             with torch.no_grad():
-                                costbais.append(torch.tanh(model[level](query_feats, trees, indexes).to(DEVICE)).add(1))
+                                costbais.append(torch.tanh(model[level](query_feats, trees, indexes).to(DEVICE)).add(1)) # 计算 使用当前 level 的模型计算，使用 tanh 函数后 + 1 
                         costbais = torch.cat(costbais, 1)
                         costbais_mean = torch.mean(costbais, dim=1)
-                        cost_t = torch.mul(costbais_mean, torch_dpcosts)
+                        cost_t = torch.mul(costbais_mean, torch_dpcosts) # 计算 相乘
                         costlist = cost_t.tolist()
                         cost_min, _ = torch.min(cost_t, dim=0)
                         var = torch.var(costbais, dim=1)
-                        ucb = var / var.max() - cost_min / cost_min.max()
-                        bayes_list.extend(ucb.tolist())
+                        ucb = var / var.max() - cost_min / cost_min.max() # 计算 上置信界Upper Confidence Bound来估计不确定性
+                        bayes_list.extend(ucb.tolist()) # 转换 将ucb的值转换为列表 放入 bayes_list
 
-                        if not FirstTrain and not dpsign and level > num_rels - 4:
+                        if not FirstTrain and not dpsign and level > num_rels - 4: # 判断 当没有使用 dp 时
                             # print('bayes_list len :',len(bayes_list))
                             # print('bayes tep num :',len(bayes_tep))
                             bayes_list = torch.tensor(bayes_list)
                             # ucb_argsort = torch.argsort(bayes_list, descending=True)
-                            ucb_argsort = torch.argsort(bayes_list, descending=True)
-                            p = 0.1
-                            n = math.ceil(p * len(bayes_tep))
-                            for i in range(n):
-                                bayes_plan = bayes_tep[ucb_argsort[i]]
+                            ucb_argsort = torch.argsort(bayes_list, descending=True) # 获得 降序排序的 ucb 
+                            p = 0.1 # 用于 选取 p 比例的 bayes_tep 进行处理
+                            n = math.ceil(p * len(bayes_tep)) # 计算 向上取整
+                            for i in range(n): # 遍历 排序后的部分plans
+                                bayes_plan = bayes_tep[ucb_argsort[i]] # 获取 某一个plan
                                 usebuffer = False
                                 for j in exp[level]:
-                                    if (j[2] == bayes_plan[2] and j[1] == bayes_plan[1]):
+                                    if (j[2] == bayes_plan[2] and j[1] == bayes_plan[1]): # 判断 在buffer中找到与当前 bayes_plan 对应的 exp，就获取 latency 并跳出循环
                                         usebuffer = True
                                         blatency = j[3]
                                         break
-                                if (usebuffer == False):
+                                if (usebuffer == False): # 判断 buffer中没有对应的 exp 
                                     num = num + 1
-                                    if slackTimeout(exp[level]):
+                                    if slackTimeout(exp[level]): # 判断 是否需要放宽超时设置；如需放宽，设置 12000 来从PG中获取 latency 
                                         blatency = postgres.GetLatencyFromPg(bayes_plan[1], bayes_plan[2],
                                                                              verbose=False,
                                                                              check_hint_used=False, timeout=12000,
@@ -2083,8 +2098,9 @@ class DynamicProgramming(object):
 
                     else:
                         costlist = dp_costs
+                    
                     for i in range(0, len(costlist)):
-                        if join_ids not in dp_table or dp_table[join_ids][
+                        if join_ids not in dp_table or dp_table[join_ids][ # 判断 join_ids 不在dp_table 中，或者原来存的 cost 更大
                             0] > costlist[i]:
                             if (FirstTrain or dpsign) and level > num_rels - 4:
                                 tem = []
@@ -2130,18 +2146,18 @@ class DynamicProgramming(object):
                             dp_table[join_ids] = (costlist[i], dp_join[i])
 
             if level > 6 and level < 15 and level < num_rels - 1:
-                temtable = copy.deepcopy(dp_table)
+                temtable = copy.deepcopy(dp_table) # dp_table 结构为 cost 和 node 信息
                 if not FirstTrain:
                     temcost = []
                     temnodes = []
                     tem_query_encodings = []
-                    for key, values in temtable.items():
-                        temcost.append(values[0])
+                    for key, values in temtable.items(): # 将 temtable 中的每个项加入上面三个 list 
+                        temcost.append(values[0]) # 添加 cost
                         temnodes.append(values[1].info["node"])
                         tem_query_encodings.append(values[1].info["encoding"])
                     #  print("nodes num = ",len(temnodes))
                     temquery_feats = (torch.cat(tem_query_encodings, dim=0)).to(DEVICE)
-                    temtrees, temindexes = TreeConvFeaturize(nodeFeaturizer, temnodes)
+                    temtrees, temindexes = TreeConvFeaturize(nodeFeaturizer, temnodes) # 获得 temp 的 树结构 和 索引
                     if torch.cuda.is_available():
                         temtrees = temtrees.to(DEVICE)
                         temindexes = temindexes.to(DEVICE)
@@ -2156,12 +2172,12 @@ class DynamicProgramming(object):
                     temcostbais = torch.mean(temcostbais, dim=1)
                     temcostlist = torch.mul(temcostbais, torch_costs).tolist()
                     count = 0
-                    for key in temtable:
+                    for key in temtable: # 更新 temtable 中的 key
                         temtable[key] = (temcostlist[count], temtable[key][1])
                         count = count + 1
-                sortlist = dict(sorted(temtable.items(), key=lambda x: x[1][0])[math.ceil(len(dp_table) * 0.3):])
+                sortlist = dict(sorted(temtable.items(), key=lambda x: x[1][0])[math.ceil(len(dp_table) * 0.3):]) # 将 temtable 按 cost 排序，取30%部分生成 sortlist
                 for key in sortlist:
-                    dp_table.pop(key)
+                    dp_table.pop(key) # 移除键 【剪枝】
                 dp_tables[level] = dp_table
         bestplanhint = list(dp_tables[num_rels].values())[0][1].hint_str()
         # print(list(dp_tables[num_rels].values())[0][1].info)

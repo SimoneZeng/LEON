@@ -313,6 +313,10 @@ def getModels(maxLevel):
 
 
 def getModelsFromFile(maxLevel, modelpath):
+    """
+    对每一个 level 构建 TreeConvolution (query, plan) -> value
+    返回所有 level 的 model 和 optimizer 
+    """
     modellist = ['blank', 'blank']
     optlist = ['blank', 'blank']
     for i in range(2, maxLevel + 1):
@@ -338,8 +342,8 @@ def setInitialTimeout(sqls: list, dropbuffer, testtime=3):
         for j in range(0, testtime):
             tem1 = tem1 + postgres.GetLatencyFromPg(i, None, verbose=False, check_hint_used=False, timeout=90000,
                                                     dropbuffer=dropbuffer)
-        timeout = tem1 / float(testtime)
-        timeoutlist.append(round(timeout, 3))
+        timeout = tem1 / float(testtime) # 计算某个 sql 的平均执行时间
+        timeoutlist.append(round(timeout, 3)) # 保留 3 位小数
     return timeoutlist
 
 
@@ -413,7 +417,7 @@ if __name__ == '__main__':
     ########################################################
     seed_torch()
     if FirstTrain:
-        exp = [[] for _ in range(20)]
+        exp = [[] for _ in range(20)] # exp 经验池 E 
         finexp = [[] for _ in range(20)]
         costCache = {}
     else:
@@ -431,7 +435,7 @@ if __name__ == '__main__':
         print('load exp bestsubplans costcache success !!')
     allstime = time.time()
     workload = envs.JoinOrderBenchmark(envs.JoinOrderBenchmark.Params())
-    workload.workload_info.table_num_rows = postgres.GetAllTableNumRows(workload.workload_info.rel_names)
+    workload.workload_info.table_num_rows = postgres.GetAllTableNumRows(workload.workload_info.rel_names) # workload_info 存 sets of possible relations/aliases/join types
     # need to change parms
     gamma = 0.25
     learning_rate = 1e-3
@@ -455,13 +459,13 @@ if __name__ == '__main__':
     sqls = load_sql(sqllist)
     testsqls = load_sql(testsqllist)
     trainsqls = load_sql(Ttrainsqllist)
-    bestplandata = [[[] for _ in range(20)] for _ in range(len(trainquery))]
+    bestplandata = [[[] for _ in range(20)] for _ in range(len(trainquery))] # 二维列表，20为行数，每个元素都是空列表 []
     bestplanslist = [[] for _ in range(len(sqls))]
     iteration_num = 30
 
     # initial timeout and it will update in dp
-    timeoutlist = setInitialTimeout(sqls, dropbuffer, testtime=3)
-    pg_latency_train = getPG_latency(trainsqls)
+    timeoutlist = setInitialTimeout(sqls, dropbuffer, testtime=3) # 获得一组 sql 的平均执行时间
+    pg_latency_train = getPG_latency(trainsqls) # 获得一组 sql 的 latency，存在列表中
     print('pg_base_latency_train', pg_latency_train)
     pg_latency_test = getPG_latency(testsqls)
     print('pg_base_latency_test', pg_latency_test)
@@ -480,14 +484,22 @@ if __name__ == '__main__':
     loss_fn = ''
     from util import plans_lib
 
-    nodeFeaturizer = plans_lib.PhysicalTreeNodeFeaturizer(workload.workload_info)
+    nodeFeaturizer = plans_lib.PhysicalTreeNodeFeaturizer(workload.workload_info) # 对单个 node 提取 node feature
     dpsign = True
-    for i in range(0, len(sqls)):
+    for i in range(0, len(sqls)): # 这里的循环主要为了获得 maxLevel 
+        '''
+        DP.getPreCondition  将一个 SQL 查询预处理为查询优化所需的数据结构和信息
+        return:
+        join_graph 通过解析SQL查询，连接图表示一个 SQL 查询中不同数据表之间的连接关系，连接图中有 1. 扫描操作节点 2. 连接操作节点
+        all_join_conds 表示一个 SQL 查询的所有连接条件
+        query_leaves 图中叶子节点的列表
+        origin_dp_tables 每个 level 有一个 dp table
+        '''
         join_graph, all_join_conds, query_leaves, origin_dp_tables = DP.getPreCondition(sqllist[i])
         dp_tables1 = copy.deepcopy(origin_dp_tables)
         maxLevel = maxLevel if maxLevel > len(query_leaves) else len(query_leaves)
     if not FirstTrain:
-        model_levels, optlist = getModelsFromFile(maxLevel, modelpath)
+        model_levels, optlist = getModelsFromFile(maxLevel, modelpath) # 获得 所有 level 的 model 和 optimizer 
     else:
         model_levels, optlist = getModels(maxLevel)
 
@@ -499,6 +511,14 @@ if __name__ == '__main__':
             if dp_Signs[i]:
                 join_graph, all_join_conds, query_leaves, origin_dp_tables = DP.getPreCondition(sqllist[i])
                 dp_tables1 = copy.deepcopy(origin_dp_tables)
+                '''
+                调用 UCB_left_prune_replay_fix_kl 在 search.py 中
+                return:
+                output1 
+                bestplanhint 
+                num 
+                timeout 
+                '''
                 output1, bestplanhint, num, timeout = DP.dp.UCB_left_prune_replay_fix_kl(join_graph, all_join_conds,
                                                                                          query_leaves,
                                                                                          dp_tables1, workload, exp,

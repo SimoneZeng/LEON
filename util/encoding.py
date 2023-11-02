@@ -24,7 +24,7 @@ def TreeConvFeaturize(plan_featurizer, subplans):
 
 
 def getencoding_Balsa(sql, hint, workload):
-    with pg_executor.Cursor() as cursor:
+    with pg_executor.Cursor() as cursor: # 将 sql 转换为 plan node 
         node0 = postgres.SqlToPlanNode(sql, comment=hint, verbose=False,
                                        cursor=cursor)[0]
     node = plans_lib.FilterScansOrJoins([node0])[0]
@@ -32,7 +32,7 @@ def getencoding_Balsa(sql, hint, workload):
     plans_lib.GatherUnaryFiltersInfo(node)
     postgres.EstimateFilterRows(node)
     queryFeaturizer = plans_lib.QueryFeaturizer(workload.workload_info)
-    query_vecs = torch.from_numpy(queryFeaturizer(node)).unsqueeze(0)
+    query_vecs = torch.from_numpy(queryFeaturizer(node)).unsqueeze(0) # queryFeaturizer 将 node 转换为 numpy array
     if torch.cuda.is_available():
         return [query_vecs.cuda(), node]
     return [query_vecs, node]

@@ -69,7 +69,7 @@ def getPreCondition(sqlFiles):
         if len(temselelist) > 0:
             temnode.info['select_exprs'] = ' , '.join(temselelist)
         rootNode.children.append(temnode)
-    join_graph, all_join_conds = rootNode.GetOrParseSql()
+    join_graph, all_join_conds = rootNode.GetOrParseSql() # 将 sql 解析为 连接图 和 连接条件
     assert len(join_graph.edges) == len(all_join_conds)
     # Base tables to join.
     query_leaves = rootNode.CopyLeaves()
