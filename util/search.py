@@ -1961,31 +1961,43 @@ class DynamicProgramming(object):
                                      dpsign, levelList):
         """
         - 遍历 levels, 对于每一个 level
-            - 遍历左右所有元组
-                1. 合并左右两边的关系ID 获得 【join_ids】
-                2. 【遍历所有 join 连接】，将(dp cost,join, join_ids)  加入 bayes_tep
-                3. 对于 level > num_rels - 4, 获得 query_feats, trees, indexes; 非中间 level 的 costlist = dp_costs
+            - 遍历[level - 1] 和 [1] 所有(连接)表
+                1. 合并左右两边的(连接)表ID 获得 【join_ids】
+                2. 针对一对 [level - 1] 和 [1] 的(连接)表, 【遍历所有 join 连接】，将(dp cost,join, join_ids)  加入 bayes_tep
+                3. 对于 level > num_rels - 4, 获得 query_feats, trees, indexes; 底下几层 level 的 costlist = dp_costs
                     a) 重复计算 cost, 【计算UCB上置信界来估计不确定性】, 并放入 bayes_list
                     b) 如果没有使用 dp, 遍历部分按UCB排序后的 plans, 获得一个 bayes_plan的 【latency】, 并加入该 level 的 trainBuffer 和 exp
                 4. 遍历 costlist 中的所有代价估计, 如果 join_ids 不在 dp_table 中或者原来存的 cost 更大, 更新 dp_table 
-            - 对于 中间层, 按 dp_table 中的 items 按 cost 排序, 进行【剪枝】
+            - 对于 中间层, 按 dp_table 中的 items 按 cost 排序, 进行键(连接)表【剪枝】
         - 获得 【bestplanhint】, 使用 PG 计算其 latency
 
         return
         trainBuffer, bestplanhint, num, timeout
+        trainBuffer 的组织形式 
+        - trainBuffer[level]
+            - 每个 level 中的一项是一个 cost 信息
+                - [0] cost
+                - [1] sql
+                - [2] hint
+                - [3] latency
+                - [4] [dp_query_encoding, dp_node]
+                - [5] dp_join
+                - [6] join_ids 
+        bestplanhint 出了如何以最佳方式执行查询的指示
         """
-        num_rels = len(query_leaves) # 指 查询涉及的关系数 即表的数量
-        num = 0
+        num_rels = len(query_leaves) # 指 查询涉及的关系数, 两两连接 所以 num_rels 就是层数 levels
+        num = 0 # 这个 sql 在 buffer 中的第几条记录
         latency = 0
         for i in range(0, num_rels + 1): # 创建 空的 trainBuffer
             trainBuffer.append([])
         for level in range(2, num_rels + 1): # 遍历 不同 level，从两个关系的连接开始
-            dp_table = dp_tables[level] # 获取 当前 level 的 dp table， 并打乱 level-1 和 1 中的 key 顺序
+            # -------- dp_tables[level][leaf_node.table_alias] = (cost, leaf_node) ----------
+            dp_table = dp_tables[level] # 获取 当前 level 所有(连接)表的 dp table， 并打乱 level-1 和 1 的 dp table 中的 key 顺序
             dp_table_i = random_dic(dp_tables[level - 1])
             dp_table_j = random_dic(dp_tables[1])
-            for l_ids, l_tup in dp_table_i.items(): # 遍历 左表和右表中的所有元组
+            for l_ids, l_tup in dp_table_i.items(): # 遍历 [level - 1]; l_ids是一个(连接)表的别名, l_tup 是一个 (cost, leaf_node)
                 for r_ids, r_tup in dp_table_j.items():
-                    l = l_tup[1] # 获取 表
+                    l = l_tup[1] # 获取 leaf_node
                     r = r_tup[1]
                     if not plans_lib.ExistsJoinEdgeInGraph( # 检查 两个关系是否有可用的连接关系，没有就跳过
                             l, r, join_graph):
@@ -2005,8 +2017,8 @@ class DynamicProgramming(object):
                     dp_join = []
                     bayes_tep = []
                     bayes_list = []
-                    for join in EnumerateJoinWithOps( # 遍历 所有有效的 join 操作
-                            l,
+                    for join in EnumerateJoinWithOps( # 遍历 针对一对 [level - 1] 和 [1] 的(连接)表, 所有有效的 join 操作, 记录 cost
+                            l, # leaf_node
                             r,
                             self.join_ops,
                             self.scan_ops,
@@ -2146,7 +2158,7 @@ class DynamicProgramming(object):
                             dp_table[join_ids] = (costlist[i], dp_join[i])
 
             if level > 6 and level < 15 and level < num_rels - 1:
-                temtable = copy.deepcopy(dp_table) # dp_table 结构为 cost 和 node 信息
+                temtable = copy.deepcopy(dp_table) # dp_table  (cost, leaf_node)
                 if not FirstTrain:
                     temcost = []
                     temnodes = []
@@ -2172,12 +2184,12 @@ class DynamicProgramming(object):
                     temcostbais = torch.mean(temcostbais, dim=1)
                     temcostlist = torch.mul(temcostbais, torch_costs).tolist()
                     count = 0
-                    for key in temtable: # 更新 temtable 中的 key
+                    for key in temtable: # 更新 temtable 中的 cost, 第二项leaf_node不变
                         temtable[key] = (temcostlist[count], temtable[key][1])
                         count = count + 1
                 sortlist = dict(sorted(temtable.items(), key=lambda x: x[1][0])[math.ceil(len(dp_table) * 0.3):]) # 将 temtable 按 cost 排序，取30%部分生成 sortlist
                 for key in sortlist:
-                    dp_table.pop(key) # 移除键 【剪枝】
+                    dp_table.pop(key) # 移除键(连接)表 【剪枝】
                 dp_tables[level] = dp_table
         bestplanhint = list(dp_tables[num_rels].values())[0][1].hint_str()
         # print(list(dp_tables[num_rels].values())[0][1].info)

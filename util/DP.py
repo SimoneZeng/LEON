@@ -44,6 +44,11 @@ def oneSqlDP(sqlFiles, model, exp):
 
 
 def getPreCondition(sqlFiles):
+    '''
+    return 
+    dp_tables 是字典 key是level和表的别名, value是 tuple 含有到达当前node 的最小 cost
+    e.g. 当优化器考虑将 A 和 B 连接起来时, 会查看dp_tables[1]['A']和dp_tables[1]['B'], 计算连接的成本, 并将结果存储在 dp_tables[2]['AB']
+    '''
     with open(sqlFiles, 'r') as f:
         data = f.read().splitlines()
         sql = ' '.join(data)

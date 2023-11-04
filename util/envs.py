@@ -28,28 +28,28 @@ class Workload(object):
 
     @classmethod
     def Params(cls):
-        p = hyperparams.InstantiableParams(cls)
-        p.Define('query_dir', None, 'Directory to workload queries.')
+        p = hyperparams.InstantiableParams(cls) # 创建一个参数实例
+        p.Define('query_dir', None, 'Directory to workload queries.') # 查询目录
         p.Define(
             'query_glob', '*.sql',
             'If supplied, glob for this pattern.  Otherwise, use all queries.' \
             '  Example: 29*.sql.'
-        )
+        ) # 查询匹配模式
         p.Define(
             'loop_through_queries', False,
             'Loop through a random permutation of queries? '
-            'Desirable for evaluation.')
+            'Desirable for evaluation.') # 是否循环查询
         p.Define(
             'test_query_glob', None,
             'Similar usage as query_glob. If None, treating all queries' \
             ' as training nodes.'
-        )
+        ) # 用于测试的查询匹配模式
         p.Define('search_space_join_ops',
                  ['Hash Join', 'Merge Join', 'Nested Loop'],
-                 'Join operators to learn.')
+                 'Join operators to learn.') # 可搜索的连接操作
         p.Define('search_space_scan_ops',
                  ['Index Scan', 'Index Only Scan', 'Seq Scan'],
-                 'Scan operators to learn.')
+                 'Scan operators to learn.') # 可搜索的扫描操作
         return p
 
     def __init__(self, params):

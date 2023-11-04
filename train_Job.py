@@ -35,18 +35,25 @@ def seed_torch(seed=3407):
 
 
 def getTrainPair(output1, output2, trainpair):
-    for i in range(0, len(output1)):
+    """
+    在 output1 和 output2 相同 level 中, 找满足条件的 pair
+
+    return
+    trainpair[level]
+    对于每个 level 中的一项，[encoding_j, lantency_j, cost_j, encoding_k, lantency_k, cost_k]
+    """
+    for i in range(0, len(output1)): # 遍历 level
         if len(output1[i]) == 0 or len(output2[i]) == 0:
             continue
         for j in output1[i]:
             for k in output2[i]:
-                if (j[2] == k[2]) and (j[1] == k[1]):
+                if (j[2] == k[2]) and (j[1] == k[1]): # hint 和 sql 相同
                     #  print('equal')
                     continue
-                if (j[3] == k[3]):
+                if (j[3] == k[3]): # latency 相同
                     #  print('equal')
                     continue
-                if (j[6] != k[6]):
+                if (j[6] != k[6]): # join_ids 不一样
                     continue
                 tem = []
                 # encoding
@@ -274,6 +281,17 @@ def collects(finnode, workload, exp, timeout):
 
 
 def getGMRL(sqls, modellist, pg_latency, nodeFeaturizer, costCache, workload, exp=None, old=None):
+    '''
+    计算 一组SQL查询的几何平均相对延迟(Geometric Mean of Relative Latencies, GMRL) 一种评估查询优化模型性能的指标
+    - 遍历 sql
+        - 获取 预处理条件
+        - 获得 best plan hint和最终node, 使用了剪枝
+    - 遍历 sql
+        - 计算 3次latency平均值
+        - 计算 latency平均值和pg_latency 的相对延迟alllatency
+    - 判断 有旧latency数据时
+        - 遍历 sql, 判断alllatency表现为退化时, 收集信息
+    '''
     sql_ = load_sql(load_sql_Files(sqls))
     hints = []
     alllatency = []
@@ -440,6 +458,12 @@ if __name__ == '__main__':
     gamma = 0.25
     learning_rate = 1e-3
     dropbuffer = False
+    '''
+    数据对应关系
+    trainquery      sqllist         sqls        timeoutlist
+    Ttrainquery     Ttrainsqllist   trainsqls   pg_latency_train
+    testquery       testsqllist     testsqls    pg_latency_test
+    '''
     # queries for train
     trainquery = ['1a', '2a', '3a', '4a', '5a', '6a', '7a', '8a', '9a', '10a', '11a', '12a', '13a', '14a', '15a', '16a',
                   '17a', '18a', '19a', '20a',
@@ -459,8 +483,8 @@ if __name__ == '__main__':
     sqls = load_sql(sqllist)
     testsqls = load_sql(testsqllist)
     trainsqls = load_sql(Ttrainsqllist)
-    bestplandata = [[[] for _ in range(20)] for _ in range(len(trainquery))] # 二维列表，20为行数，每个元素都是空列表 []
-    bestplanslist = [[] for _ in range(len(sqls))]
+    bestplandata = [[[] for _ in range(20)] for _ in range(len(trainquery))] # 二维列表，20为行数，每个元素都是空列表 [] UNUSED
+    bestplanslist = [[] for _ in range(len(sqls))] # 记录每个 sql 的 best plan hint
     iteration_num = 30
 
     # initial timeout and it will update in dp
@@ -484,13 +508,31 @@ if __name__ == '__main__':
     loss_fn = ''
     from util import plans_lib
 
+
+    """
+    =================================== main 主要逻辑 ============================================
+
+    - 遍历 sqllist, 获得 maxLevel
+    - 获得 所有 level 的 model 和 optimizer （根据 maxLevel)
+    - 循环 iter, 只有第一次 dpsign 为 True
+        - 遍历 sqls
+            - 判断 当某个sql的dp_Signs为True时
+                a) 预处理 为查询优化所需的信息
+                b) 使用 UCB_left_prune_replay_fix_kl 遍历levels;  计算cost, UCB, latency, 更新、剪枝 dp_table; 获得 train buffer, bestplanhint, num, timeout
+                c) 获得 train pairs用来后续训练
+            - 判断 timeoutlist[i] 比 pg_latency_train[i] 小很多时, dp_Signs[i] 为 False
+        - 遍历 所有levels的model
+            - 获得 当前 level 的 optimizer, temtrainpair
+                - 迭代 500个epoch; train, test, 每个 batch 跑10次
+        - getGMRL
+    """
     nodeFeaturizer = plans_lib.PhysicalTreeNodeFeaturizer(workload.workload_info) # 对单个 node 提取 node feature
     dpsign = True
     for i in range(0, len(sqls)): # 这里的循环主要为了获得 maxLevel 
         '''
         DP.getPreCondition  将一个 SQL 查询预处理为查询优化所需的数据结构和信息
         return:
-        join_graph 通过解析SQL查询，连接图表示一个 SQL 查询中不同数据表之间的连接关系，连接图中有 1. 扫描操作节点 2. 连接操作节点
+        join_graph 通过解析SQL查询, 连接图表示一个 SQL 查询中不同数据表之间的连接关系，连接图中有 1. 扫描操作节点 2. 连接操作节点
         all_join_conds 表示一个 SQL 查询的所有连接条件
         query_leaves 图中叶子节点的列表
         origin_dp_tables 每个 level 有一个 dp table
@@ -512,12 +554,10 @@ if __name__ == '__main__':
                 join_graph, all_join_conds, query_leaves, origin_dp_tables = DP.getPreCondition(sqllist[i])
                 dp_tables1 = copy.deepcopy(origin_dp_tables)
                 '''
-                调用 UCB_left_prune_replay_fix_kl 在 search.py 中
-                return:
-                output1 
-                bestplanhint 
-                num 
-                timeout 
+                对某一个 sql 调用 UCB_left_prune_replay_fix_kl 在 search.py 中
+
+                return: 
+                output1 是 train buffer
                 '''
                 output1, bestplanhint, num, timeout = DP.dp.UCB_left_prune_replay_fix_kl(join_graph, all_join_conds,
                                                                                          query_leaves,
@@ -535,7 +575,7 @@ if __name__ == '__main__':
                 greedy = greedy - decay
                 timeoutlist[i] = round(timeout, 3)
                 bestplanslist[i].append([bestplanhint, num])
-                getTrainPair(output1, exp, trainpair)
+                getTrainPair(output1, exp, trainpair) # 获得满足条件的 train pair [encoding_j, lantency_j, cost_j, encoding_k, lantency_k, cost_k]
                 output1.clear()
             if timeoutlist[i] < pg_latency_train[i] * 0.68:
                 dp_Signs[i] = False
@@ -556,53 +596,56 @@ if __name__ == '__main__':
         testTimes = 0
         FirstTrain = False
         for modelnum in range(2, len(model_levels)):
-            optimizer = optlist[modelnum]
-            temtrainpair = copy.deepcopy(trainpair[modelnum])
+            optimizer = optlist[modelnum] # 获取 当前 level 的 optimizer
+            temtrainpair = copy.deepcopy(trainpair[modelnum]) # 深拷贝 当前 level 的所有 train pairs
             if len(temtrainpair) < 2:
                 continue
-            for epoch in range(0, 500):
+            for epoch in range(0, 500): # 迭代 500次训练周期
                 ttime = time.time()
-                shuffled_indices = np.random.permutation(len(temtrainpair))
-                # train
+                shuffled_indices = np.random.permutation(len(temtrainpair)) # 创建 shuffle后的索引数组
+                # ----------- train -----------
+                # 数据预处理，前向传播，计算损失函数，反向传播以及优化器的更新
                 current_idx = 0
-                while current_idx < len(shuffled_indices):
+                while current_idx < len(shuffled_indices): # 遍历 batches
                     currentTrainPair = [temtrainpair[idx] for idx in
-                                        shuffled_indices[current_idx: current_idx + batchsize]]
+                                        shuffled_indices[current_idx: current_idx + batchsize]] # 获取 batch size 的 train pairs (根据shuffled_indices中的索引)
                     query_feats = []
                     nodes = []
                     latencies = []
                     costs = []
-                    torch.cuda.empty_cache()
-                    for i in currentTrainPair:
-                        query_feats.append(i[0][0])
-                        query_feats.append(i[3][0])
-                        nodes.append(i[0][1])
-                        nodes.append(i[3][1])
-                        latencies.append(i[1])
-                        latencies.append(i[4])
-                        costs.append(i[2])
-                        costs.append(i[5])
+                    torch.cuda.empty_cache() # 清空 cuda缓存
+                    for i in currentTrainPair: # 遍历 当前batch的 train pairs
+                        query_feats.append(i[0][0]) # encoding_j 的 dp_query_encoding
+                        query_feats.append(i[3][0]) # encoding_k 的 dp_query_encoding
+                        nodes.append(i[0][1]) # encoding_j 的 dp_node
+                        nodes.append(i[3][1]) # encoding_k 的 dp_node
+                        latencies.append(i[1]) # lantency_j
+                        latencies.append(i[4]) # lantency_k
+                        costs.append(i[2]) # cost_j
+                        costs.append(i[5]) # cost_k
                     query_feats = (torch.cat(query_feats, dim=0)).to(DEVICE)
                     trees, indexes = TreeConvFeaturize(nodeFeaturizer, nodes)
                     if torch.cuda.is_available():
                         trees = trees.to(DEVICE)
                         indexes = indexes.to(DEVICE)
                     calibration = []
-                    for i in range(10):
+                    for i in range(10): # 对于 当前 batch, 运行模型10次
                         calibration.append(
                             torch.tanh(model_levels[modelnum](query_feats, trees, indexes).to(DEVICE)).add(1))
-
                     calibration = torch.cat(calibration, 1)
-                    calibration = torch.mean(calibration, dim=1)
-                    temloss = calculateLossForBatch(latencies, costs, calibration)
-                    loss = torch.mean(temloss, 0)
+                    calibration = torch.mean(calibration, dim=1) # 计算 10次校准的平均值
+                    temloss = calculateLossForBatch(latencies, costs, calibration) # 计算 loss
+                    loss = torch.mean(temloss, 0) # 计算 平均loss
                     optimizer.zero_grad()
                     loss.backward()
-                    optimizer.step()
+                    optimizer.step() # 计算梯度 更新模型参数
                     current_idx += batchsize
                 trainTimes = trainTimes + time.time() - ttime
+                
+                # ----------- validate -----------
+                # 数据预处理，前向传播，accuracy性能评估
                 tetime = time.time()
-                acc = 0
+                acc = 0 # 计数 pair预测结果与ground truth 一致的数量
                 cout = 0
                 current_idx = 0
                 while current_idx < len(shuffled_indices):
@@ -633,17 +676,17 @@ if __name__ == '__main__':
                         with torch.no_grad():
                             calibration.append(
                                 torch.tanh(model_levels[modelnum](query_feats, trees, indexes)).add(1))
-                    calibration = torch.cat(calibration, 1)
-                    calibration = torch.mean(calibration, dim=1)
-                    calibration = calibration.unsqueeze(1)
-                    calibration = calibration.view(-1, 2)
+                    calibration = torch.cat(calibration, 1) # (batch_size, 10)
+                    calibration = torch.mean(calibration, dim=1) # （batch_size）
+                    calibration = calibration.unsqueeze(1) # 增加一个维度 (batch_size, 1)
+                    calibration = calibration.view(-1, 2) # reshape 为两个一行 (batch_size/2, 2)
                     costs = torch.tensor(costs, device=DEVICE).view(-1, 2)
-                    calibratedCost = calibration * costs
-                    softm = nn.functional.softmax(calibratedCost, dim=1)
-                    prediction = torch.max(softm, dim=1)[1]
+                    calibratedCost = calibration * costs # 获得 校准后的cost
+                    softm = nn.functional.softmax(calibratedCost, dim=1) # 计算 概率, calibratedCost越大 概率越大
+                    prediction = torch.max(softm, dim=1)[1] # 获得 一个pair中概率大的对应索引 0 或者 1
                     res = []
                     for i in range(0, len(latencies), 2):
-                        if latencies[i] > latencies[i + 1]:
+                        if latencies[i] > latencies[i + 1]: # 计算 一个pair的ground truth 正负例, 添加 latency 大的对应的索引
                             res.append(0)
                         else:
                             res.append(1)
@@ -651,7 +694,7 @@ if __name__ == '__main__':
                     current_idx += batchsize
                     acc += torch.sum(res == prediction).data.cpu().numpy().squeeze()
                 testTimes = testTimes + time.time() - tetime
-                logger.info("iter:{},model:{},train iters：{}，acc:{} ".format(iter, modelnum, epoch + 1, acc / cout))
+                logger.info("iter:{},model:{},train iters:{}, acc:{} ".format(iter, modelnum, epoch + 1, acc / cout))
                 if acc / cout > 0.96 or epoch > 13:
                     break
 
